@@ -1,0 +1,147 @@
+#include <WiFiManager.h>
+#include "AdafruitIO_WiFi.h"
+
+#include <HTTPClient.h>
+#include <WiFiClient.h>
+#include <UrlEncode.h>
+#include "BluetoothSerial.h"
+
+String device_name = "ESP32-GARAGEM";
+
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
+#endif
+
+#if !defined(CONFIG_BT_SPP_ENABLED)
+#error Serial Port Profile for Bluetooth is not available or not enabled. It is only available for the ESP32 chip.
+#endif
+
+BluetoothSerial SerialBT;
+
+char IO_USERNAME[64] = "";
+char IO_KEY[64] = ""; 
+AdafruitIO_WiFi io(IO_USERNAME, IO_KEY, "", "");
+AdafruitIO_Feed *digital = io.feed("digital");
+WiFiManager wifiManager;
+const int Pin_aciona = 14; // D5 
+const int Pin_velocidade = 4;
+
+unsigned long ArmazenaTempo = 0;
+const unsigned long Tempo_ = 5000; // 5 segundos
+const int sensorPin = 2;  // Sensor digital no pino 2
+int sensorState = 0;
+int lastSensorState = LOW;
+
+bool EmMovimento = false;
+bool flag = 1;
+
+String numeroTelefone = "YOU NUMBER";
+String apiKey = "";
+char Recebido; // Variável para armazenar comando Bluetooth
+
+void sendMessage(String message) {
+    String url = "http://api.callmebot.com/whatsapp.php?phone=" + numeroTelefone + "&apikey=" + apiKey + "&text=" + urlEncode(message);
+    WiFiClient client;    
+    HTTPClient http;
+    http.begin(client, url);
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    int httpResponseCode = http.POST(url);
+    if (httpResponseCode == 200) {
+        Serial.println("Mensagem enviada com sucesso");
+    } else {
+        Serial.println("Erro no envio da resposta");
+        Serial.print("HTTP código de resposta: ");
+        Serial.println(httpResponseCode);
+    }
+    http.end();
+}
+
+void abrirGaragem() {
+    int state = digitalRead(Pin_aciona);
+    sensorState = digitalRead(sensorPin);
+    if ((state == LOW) && (sensorState == LOW)) {
+        digitalWrite(Pin_aciona, HIGH);
+        digitalWrite(Pin_velocidade, LOW);
+        digitalWrite(LED_BUILTIN, LOW); // LED indica movimento
+        Serial.println("Garagem abrindo...");
+        ArmazenaTempo = millis();
+    }
+}
+
+void fecharGaragem() {
+    digitalWrite(Pin_aciona, LOW);
+    digitalWrite(Pin_velocidade, HIGH);
+    digitalWrite(LED_BUILTIN, HIGH); // LED apagado, garagem fechada
+    Serial.println("Garagem fechando...");
+    ArmazenaTempo = millis();
+}
+
+void handleMessage(AdafruitIO_Data *data) {
+    Serial.print("received <- ");
+    Serial.println(data->toString());
+    if (data->toString() == "Abrir") {
+        abrirGaragem();
+    } else if (data->toString() == "Fechar") {
+        fecharGaragem();
+    }
+}
+
+void setup() {
+    Serial.begin(9600);
+    SerialBT.begin(device_name);  
+    pinMode(LED_BUILTIN, OUTPUT);
+    pinMode(Pin_aciona, OUTPUT);
+    pinMode(Pin_velocidade, OUTPUT);
+    pinMode(sensorPin, INPUT);
+    wifiManager.setClass("invert");
+    wifiManager.setConfigPortalTimeout(120);
+    wifiManager.setAPClientCheck(true);
+
+    if (!wifiManager.autoConnect("Garagem LMK")) {
+        Serial.println("failed to connect and hit timeout");
+    } else {
+        Serial.println("Connected to WiFi.");
+        Serial.printf("Connecting to Adafruit IO with User: %s Key: %s.\n", IO_USERNAME, IO_KEY);
+        io.connect();
+        digital->onMessage(handleMessage);
+        digital->get();
+
+        while ((io.status() < AIO_CONNECTED)) {
+            Serial.print(".");
+            delay(500);
+        }
+        Serial.println("Connected to Adafruit IO.");
+    }
+}
+
+void loop() {
+    io.run();
+
+    // Verificar comandos Bluetooth
+    if (SerialBT.available()) {
+        Recebido = (char)SerialBT.read();
+        if (Recebido == 'Abrir') {
+            abrirGaragem();
+        } else if (Recebido == 'Fechar') {
+            fecharGaragem();
+        }
+    }
+
+    sensorState = digitalRead(sensorPin);
+    if (sensorState != lastSensorState) {
+        if (sensorState == HIGH) {
+            Serial.println("Sensor Inclinado!");
+        } else {
+            Serial.println("Sensor em posição normal.");
+        }
+        lastSensorState = sensorState;
+    }
+
+    unsigned long currentMillis = millis();
+    if ((currentMillis - ArmazenaTempo >= Tempo_)) {
+        digitalWrite(Pin_aciona, LOW);
+        digitalWrite(Pin_velocidade, LOW);
+        digitalWrite(LED_BUILTIN, LOW);
+        Serial.println("Movimento interrompido por tempo limite.");
+    }
+}
